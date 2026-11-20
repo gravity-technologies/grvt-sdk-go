@@ -97,6 +97,8 @@ func TestHandshakeRejectedIsFatal(t *testing.T) {
 		if !errors.As(err, &api) || api.Status != 403 {
 			t.Fatalf("want a 403 APIError, got %v", err)
 		}
+		// the call can return as soon as the socket is fatal, just before the event is emitted
+		waitUntil(t, "the fatal error event", func() bool { return len(ev.of(EventError)) > 0 })
 		if e := ev.of(EventError); len(e) != 1 || !e[0].Fatal {
 			t.Fatalf("events %+v", ev.list)
 		}
