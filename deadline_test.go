@@ -40,7 +40,7 @@ func TestCallDeadlineStopsLateHookBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestCallDeadlineAfterDispatchKeepsCauseAndFinalIDs(t *testing.T) {
+func TestCallDeadlineAfterDispatchKeepsCauseAndIDs(t *testing.T) {
 	type request struct {
 		Order struct {
 			Metadata struct {
@@ -49,7 +49,6 @@ func TestCallDeadlineAfterDispatchKeepsCauseAndFinalIDs(t *testing.T) {
 		} `json:"order"`
 	}
 	rt, err := NewRuntime(Config{Env: Testnet(), CallTimeout: 10 * time.Millisecond,
-		BeforeSend: func(call *OutgoingCall) { call.Params.(*request).Order.Metadata.ID = 99 },
 		HTTPClient: &http.Client{Transport: deadlineTransport(func(r *http.Request) (*http.Response, error) {
 			httptrace.ContextClientTrace(r.Context()).WroteHeaders()
 			<-r.Context().Done()
@@ -63,7 +62,7 @@ func TestCallDeadlineAfterDispatchKeepsCauseAndFinalIDs(t *testing.T) {
 	info := &RequestInfo[request]{ClientOrderID: func(r *request, _ ClientOrderIDProvider) uint64 { r.Order.Metadata.ID = 7; return 7 }}
 	_, err = Call[request, struct{}](context.Background(), rt, &RPCSpec{Method: "write", Write: true, Gateway: GatewayTrading, Path: "/write"}, nil, info, nil)
 	var unknown *OrderStateUnknownError
-	if !errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) || unknown.ClientOrderID != 99 {
+	if !errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) || unknown.ClientOrderID != 7 {
 		t.Fatalf("%+v", err)
 	}
 }
@@ -205,52 +204,54 @@ func TestOpaqueTransportCancellationWithoutTraceIsUnknown(t *testing.T) {
 }
 
 func TestQueuedWSWriteCancellationDoesNotDropSharedConnection(t *testing.T) {
-	g := newFakeGateway(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	c, _ := wsTradingClient(t, g, func(cfg *Config) {
-		cfg.OnEvent = func(e Event) {
-			if e.Outgoing && bytes.Contains(e.Raw, []byte("active_read")) {
-				close(entered)
-				<-release
+	eachEncoding(t, func(t *testing.T, enc Encoding) {
+		g := newFakeGateway(t, enc)
+		entered, release := make(chan struct{}), make(chan struct{})
+		c, _ := wsTradingClient(t, g, func(cfg *Config) {
+			cfg.OnEvent = func(e Event) {
+				if e.Outgoing && bytes.Contains(e.Raw, []byte("active_read")) {
+					close(entered)
+					<-release
+				}
 			}
+		})
+		s := c.rt.Socket(GatewayTrading)
+		s.start()
+		epoch, _, err := s.waitUp(context.Background(), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Hold a real concurrent request in its outgoing hook while it owns the writer.
+		active := make(chan error, 1)
+		go func() {
+			_, requestErr := s.request(context.Background(), "active_read", []byte(`{}`), false, nil)
+			active <- requestErr
+		}()
+		<-entered
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		_, err = s.request(ctx, "queued_write", []byte(`{}`), true, []uint64{42})
+		var transport *TransportError
+		if !errors.As(err, &transport) || transport.Sent || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued write must be unsent: %v", err)
+		}
+		close(release)
+		if activeErr := <-active; activeErr != nil {
+			t.Fatal(activeErr)
+		}
+		if g.calls("queued_write") != 0 {
+			t.Fatal("cancelled write reached gateway")
+		}
+		_, err = s.request(context.Background(), "unrelated_read", []byte(`{}`), false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.epoch != epoch || s.state != connUp {
+			t.Fatal("caller cancellation dropped shared socket")
 		}
 	})
-	s := c.rt.Socket(GatewayTrading)
-	s.start()
-	epoch, _, err := s.waitUp(context.Background(), time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Hold a real concurrent request in its outgoing hook while it owns the writer.
-	active := make(chan error, 1)
-	go func() {
-		_, requestErr := s.request(context.Background(), "active_read", []byte(`{}`), false, nil)
-		active <- requestErr
-	}()
-	<-entered
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	_, err = s.request(ctx, "queued_write", []byte(`{}`), true, []uint64{42})
-	var transport *TransportError
-	if !errors.As(err, &transport) || transport.Sent || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("queued write must be unsent: %v", err)
-	}
-	close(release)
-	if activeErr := <-active; activeErr != nil {
-		t.Fatal(activeErr)
-	}
-	if g.calls("queued_write") != 0 {
-		t.Fatal("cancelled write reached gateway")
-	}
-	_, err = s.request(context.Background(), "unrelated_read", []byte(`{}`), false, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.epoch != epoch || s.state != connUp {
-		t.Fatal("caller cancellation dropped shared socket")
-	}
 }
 
 func TestActiveWSWriteCancellationLeavesOtherCallAlive(t *testing.T) {

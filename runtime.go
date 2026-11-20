@@ -59,8 +59,11 @@ type Runtime struct {
 
 // NewRuntime builds the runtime. errors is the generated error table; New passes it.
 func NewRuntime(cfg Config, errors ErrorTable) (*Runtime, error) {
-	if cfg.CallTimeout < 0 || cfg.HTTPAttemptTimeout < 0 || cfg.WSRequestTimeout < 0 || cfg.ResyncTimeout < 0 {
-		return nil, &ConfigError{Message: "CallTimeout, HTTPAttemptTimeout, WSRequestTimeout and ResyncTimeout must be positive (zero uses defaults)"}
+	if cfg.CallTimeout < 0 || cfg.HTTPAttemptTimeout < 0 || cfg.WSRequestTimeout < 0 || cfg.ResyncTimeout < 0 || cfg.IdleTimeout < 0 {
+		return nil, &ConfigError{Message: "CallTimeout, HTTPAttemptTimeout, WSRequestTimeout, ResyncTimeout and IdleTimeout must be positive (zero uses defaults)"}
+	}
+	if cfg.QueueSize != 0 && cfg.QueueSize < behavior.QueueSizeMin {
+		return nil, &ConfigError{Message: fmt.Sprintf("QueueSize must be at least %d (zero uses the default)", behavior.QueueSizeMin)}
 	}
 	if cfg.Env == (Environment{}) {
 		return nil, &ConfigError{Message: "Config.Env is required: grvt.Testnet(), grvt.Prod() or your own Environment"}
@@ -117,7 +120,7 @@ func NewRuntime(cfg Config, errors ErrorTable) (*Runtime, error) {
 	if rt.wsRequestTimeout <= 0 {
 		rt.wsRequestTimeout = behavior.WSRequestTimeout
 	}
-	if rt.queueSize <= 0 {
+	if rt.queueSize == 0 {
 		rt.queueSize = behavior.QueueSize
 	}
 	rt.sessionRetryDelay = behavior.SessionRetryDelay
@@ -135,6 +138,9 @@ func NewRuntime(cfg Config, errors ErrorTable) (*Runtime, error) {
 	if cfg.ResyncTimeout > 0 {
 		rt.md.SetResyncTimeout(cfg.ResyncTimeout)
 		rt.td.SetResyncTimeout(cfg.ResyncTimeout)
+	}
+	if cfg.IdleTimeout > 0 {
+		rt.md.idleTimeout, rt.td.idleTimeout = cfg.IdleTimeout, cfg.IdleTimeout
 	}
 	return rt, nil
 }
@@ -239,15 +245,20 @@ func Call[Req, Resp any](ctx context.Context, rt *Runtime, spec *RPCSpec, req *R
 			return nil, missingField(spec.Method, f)
 		}
 	}
-	var clientOrderIDs []uint64
-	if info.ClientOrderID != nil {
-		if id := info.ClientOrderID(req, rt.clientOrderIDs); id != 0 {
-			clientOrderIDs = []uint64{id}
+	// Fill each order's client order id when absent and return them all. On a request that already has
+	// them, it only reads them.
+	orderIDs := func(req *Req) []uint64 {
+		if info.ClientOrderIDs != nil {
+			return info.ClientOrderIDs(req, rt.clientOrderIDs)
 		}
+		if info.ClientOrderID != nil {
+			if id := info.ClientOrderID(req, rt.clientOrderIDs); id != 0 {
+				return []uint64{id}
+			}
+		}
+		return nil
 	}
-	if info.ClientOrderIDs != nil {
-		clientOrderIDs = info.ClientOrderIDs(req, rt.clientOrderIDs)
-	}
+	clientOrderIDs := orderIDs(req)
 	via := ViaREST
 	if spec.OrderEntry && rt.orderTransport == OrderTransportWS {
 		via = ViaWS
@@ -260,6 +271,11 @@ func Call[Req, Resp any](ctx context.Context, rt *Runtime, spec *RPCSpec, req *R
 			return nil, &ConfigError{Message: fmt.Sprintf("%s: BeforeSend replaced Params with %T, want %T", spec.Method, call.Params, req)}
 		}
 		req = p
+		// The IDs are how an unknown outcome is looked up, so they must be the ones the caller knows.
+		// An id the hook removed is filled again with a new one, which fails here too.
+		if !slices.Equal(orderIDs(req), clientOrderIDs) {
+			return nil, &ConfigError{Message: fmt.Sprintf("%s: BeforeSend must not add, remove or reorder orders, or change their client order IDs", spec.Method)}
+		}
 	}
 	if deadlineErr := deadlineError(ctx); deadlineErr != nil {
 		return nil, deadlineErr
@@ -272,9 +288,6 @@ func Call[Req, Resp any](ctx context.Context, rt *Runtime, spec *RPCSpec, req *R
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, &ConfigError{Message: fmt.Sprintf("%s: cannot encode request: %v", spec.Method, err)}
-	}
-	if info.ClientOrderID != nil || info.ClientOrderIDs != nil {
-		clientOrderIDs = submittedOrderIDs(body)
 	}
 	lite := rt.wireLite(spec)
 	wire := body
@@ -471,11 +484,12 @@ func (rt *Runtime) ensureSession(ctx context.Context) error {
 }
 
 // rotateForever re-logs in at 80% of the cookie lifetime. Sockets notice the new generation and
-// reconnect when no write is in flight.
+// reconnect when no write is in flight. Each wait is until the renewal is due, but at least
+// SessionRenewMinWait, or sessionRetryDelay after a failed login (behavior.json).
 func (rt *Runtime) rotateForever() {
+	floor := behavior.SessionRenewMinWait
 	for {
-		wait := max(time.Until(rt.session.snapshot().RefreshDue()), time.Second)
-		t := time.NewTimer(wait)
+		t := time.NewTimer(max(time.Until(rt.session.snapshot().RefreshDue()), floor))
 		select {
 		case <-rt.ctx.Done():
 			t.Stop()
@@ -487,14 +501,11 @@ func (rt *Runtime) rotateForever() {
 				return
 			}
 			rt.log.Warn("grvt: session re-login failed", "err", err)
-			rt.hooks.emit(func() Event { return Event{Kind: EventError, Err: "session: " + err.Error()} })
-			select {
-			case <-rt.ctx.Done():
-				return
-			case <-time.After(rt.sessionRetryDelay):
-			}
+			rt.hooks.emit(func() Event { return Event{Kind: EventError, Fatal: false, Err: "session: " + err.Error()} })
+			floor = rt.sessionRetryDelay
 			continue
 		}
+		floor = behavior.SessionRenewMinWait
 		s := rt.session.snapshot()
 		rt.hooks.emit(func() Event {
 			return Event{Kind: EventSessionRotated, WebsocketReconnectRequired: true, Generation: s.Generation, ExpiresAt: s.ExpiresAt}
@@ -525,32 +536,6 @@ func (rt *Runtime) SyncClock(ctx context.Context, clock *SystemClock) error {
 		}
 	}
 	return nil
-}
-
-// submittedOrderIDs reads the final wire body without filling or changing any identifiers.
-func submittedOrderIDs(body []byte) []uint64 {
-	type order struct {
-		Metadata struct {
-			ID json.Number `json:"client_order_id"`
-		} `json:"metadata"`
-	}
-	var request struct {
-		Order  *order  `json:"order"`
-		Orders []order `json:"orders"`
-	}
-	if json.Unmarshal(body, &request) != nil {
-		return nil
-	}
-	if request.Order != nil {
-		request.Orders = append(request.Orders, *request.Order)
-	}
-	var ids []uint64
-	for _, o := range request.Orders {
-		if id, err := strconv.ParseUint(string(o.Metadata.ID), 10, 64); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 // Check elapsed time as well as timer delivery after synchronous user code.

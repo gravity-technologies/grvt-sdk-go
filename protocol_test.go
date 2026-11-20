@@ -13,8 +13,9 @@ import (
 	"github.com/gravity-technologies/grvt-sdk-go/models"
 )
 
-func TestClientOrderIDsUseTheAPIClientRange(t *testing.T) {
-	// The start uses all 31 counter bits, and the counter wraps without leaving the range.
+// The range itself is a shared scenario; this checks what the data can't: the counter's random start uses all
+// 31 bits, and the counter wraps without leaving the range.
+func TestClientOrderIDCounterStartsAnywhereAndWraps(t *testing.T) {
 	ids := TimeCounterClientOrderID{random: func() uint32 { return 1<<32 - 1 }}
 	a, b := ids.NextClientOrderID(), ids.NextClientOrderID()
 	if a < 1<<63 || b < 1<<63 || a&(1<<31-1) != 1<<31-1 || b&(1<<31-1) != 0 {
@@ -41,76 +42,11 @@ func TestRequestIDsSkipZeroAndInUse(t *testing.T) {
 	}
 }
 
-func TestSequencerDropsBeforeAckThenTracks(t *testing.T) {
-	var s Sequencer
-	if s.OnFrame(5, 4, true) != Drop {
-		t.Fatal("frame before ack must drop")
-	}
-	s.OnAck(100, 1)
-	steps := []struct {
-		seq, prev uint64
-		want      Verdict
-	}{
-		{0, 0, Deliver},     // snapshot
-		{100, 99, Drop},     // already covered by the snapshot
-		{101, 100, Deliver}, // first delta
-		{102, 101, Deliver},
-		{105, 103, Gap},
-	}
-	for i, st := range steps {
-		if got := s.OnFrame(st.seq, st.prev, true); got != st.want {
-			t.Fatalf("step %d: %v, want %v", i, got, st.want)
-		}
-	}
-	if s.Gaps != 1 || s.Last != 102 || s.SnapshotsLeft != 0 {
-		t.Fatalf("%+v", s)
-	}
-}
-
-// After a re-subscribe on the same socket the server's first delta carries the prev from before the
-// re-subscribe (seen on testnet). It must not count as a gap; a real gap still does.
-func TestSequencerResubscribeQuirk(t *testing.T) {
-	var s Sequencer
-	s.OnAck(110, 1)
-	s.OnFrame(0, 0, true)
-	if v := s.OnFrame(111, 105, true); v != Deliver {
-		t.Fatalf("first delta with an old prev: %v", v)
-	}
-	if v := s.OnFrame(113, 105, true); v != Gap {
-		t.Fatalf("later delta with an old prev: %v", v)
-	}
-	s.OnAck(120, 1)
-	if v := s.OnFrame(125, 122, true); v != Gap {
-		t.Fatalf("first delta with a prev past latest: %v", v)
-	}
-	s.OnAck(130, 0)
-	if v := s.OnFrame(131, 0, true); v != Deliver {
-		t.Fatalf("first delta with prev 0: %v", v)
-	}
-	if v := s.OnFrame(133, 0, true); v != Gap {
-		t.Fatalf("later delta with prev 0: %v", v)
-	}
-}
-
 func TestOnlySnapshotStreamsMayDrop(t *testing.T) {
 	for _, s := range Streams {
 		if s.Conflate != s.SnapshotFeed {
 			t.Errorf("%s: Conflate=%v SnapshotFeed=%v", s.Stream, s.Conflate, s.SnapshotFeed)
 		}
-	}
-}
-
-func TestSequencerResyncClearsOnSnapshot(t *testing.T) {
-	var s Sequencer
-	t0 := time.Now()
-	s.ResyncStarted = t0
-	s.OnAck(10, 1)
-	if !s.ResyncOverdue(t0.Add(6*time.Second), 5*time.Second) {
-		t.Fatal("should be overdue")
-	}
-	s.OnFrame(0, 0, false)
-	if s.ResyncOverdue(t0.Add(6*time.Second), 5*time.Second) {
-		t.Fatal("snapshot should clear it")
 	}
 }
 

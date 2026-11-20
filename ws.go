@@ -38,16 +38,14 @@ import (
 
 const (
 	// ConnectTimeout bounds one connect (login + handshake).
-	ConnectTimeout = 10 * time.Second
-	// Heartbeat is the client ping interval. The server pings every 5s too.
-	Heartbeat = 10 * time.Second
-	// IdleTimeout: no frame at all for this long means the connection is dead.
-	IdleTimeout = 30 * time.Second
+	ConnectTimeout = behavior.WSConnectTimeout
+	// IdleTimeout is the default Config.IdleTimeout: no frame at all, not even a ping or pong, for this
+	// long means the connection is dead.
+	IdleTimeout = behavior.WSIdleTimeout
+	// Heartbeat is the client ping interval with the default IdleTimeout: a third of it.
+	Heartbeat = IdleTimeout / 3
 	// ResyncTimeout: no snapshot this long after a gap re-subscribe means reconnect.
 	ResyncTimeout = behavior.ResyncTimeout
-	maxIncoming   = 64 << 20
-	// stableAfter: a connection that stayed up this long resets the reconnect backoff.
-	stableAfter = 10 * time.Second
 )
 
 type connState int
@@ -77,6 +75,8 @@ type Socket struct {
 	url           string
 	rt            *Runtime
 	resyncTimeout atomic.Int64
+	idleTimeout   time.Duration // set before the first connect
+	lastRx        atomic.Int64  // UnixNano of the current connection's last frame of any kind
 
 	mu         sync.Mutex
 	state      connState
@@ -102,6 +102,7 @@ func newSocket(rt *Runtime, name, url string) *Socket {
 	s := &Socket{name: name, url: url, rt: rt, changed: make(chan struct{}), requests: newRequestTable[waiter](1),
 		subs: map[uint64]*sub{}, byKey: map[string]map[string]*sub{}, closeCh: make(chan struct{}), done: make(chan struct{}), writeGate: make(chan struct{}, 1)}
 	s.resyncTimeout.Store(int64(ResyncTimeout))
+	s.idleTimeout = IdleTimeout
 	return s
 }
 
@@ -433,7 +434,11 @@ func (s *Socket) connect() (*websocket.Conn, error) {
 		s.sessionGen = gen
 		s.mu.Unlock()
 	}
-	conn, resp, err := websocket.Dial(ctx, s.url, &websocket.DialOptions{HTTPHeader: h, HTTPClient: s.rt.http}) //nolint:bodyclose // websocket.Dial owns resp.Body: nil on success, an in-memory copy on failure
+	// Read returns data frames only, so pings and pongs reach the idle check through these callbacks.
+	seen := func(context.Context, []byte) { s.lastRx.Store(time.Now().UnixNano()) }
+	opts := &websocket.DialOptions{HTTPHeader: h, HTTPClient: s.rt.http, OnPongReceived: seen,
+		OnPingReceived: func(ctx context.Context, b []byte) bool { seen(ctx, b); return true }}
+	conn, resp, err := websocket.Dial(ctx, s.url, opts) //nolint:bodyclose // websocket.Dial owns resp.Body: nil on success, an in-memory copy on failure
 	if err != nil {
 		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			// Rejected handshake (e.g. sticky-session check): retrying will not help.
@@ -441,7 +446,7 @@ func (s *Socket) connect() (*websocket.Conn, error) {
 		}
 		return nil, &TransportError{Message: "connect failed: " + err.Error(), Err: err}
 	}
-	conn.SetReadLimit(maxIncoming)
+	conn.SetReadLimit(behavior.WSMaxIncomingFrame)
 	return conn, nil
 }
 
@@ -514,7 +519,7 @@ func (s *Socket) supervise() {
 
 		upSince := time.Now()
 		code, reason := s.run(conn)
-		if time.Since(upSince) > stableAfter {
+		if time.Since(upSince) > behavior.ReconnectBackoffResetAfter {
 			backoff.Reset()
 		}
 
@@ -642,9 +647,8 @@ func (s *Socket) close() {
 func (s *Socket) run(conn *websocket.Conn) (int, string) {
 	ctx, cancel := context.WithCancel(s.rt.ctx)
 	defer cancel()
-	var lastRx atomic.Int64
-	lastRx.Store(time.Now().UnixNano())
-	go s.watchdog(ctx, conn, &lastRx)
+	s.lastRx.Store(time.Now().UnixNano())
+	go s.watchdog(ctx, conn)
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -667,17 +671,20 @@ func (s *Socket) run(conn *websocket.Conn) (int, string) {
 			s.closeNow(conn)
 			return code, reason
 		}
-		lastRx.Store(time.Now().UnixNano())
+		s.lastRx.Store(time.Now().UnixNano())
 		s.onFrame(ctx, data)
 	}
 }
 
 // watchdog drops the connection when a re-sync is overdue, the session rotated (and no write is in
-// flight), or nothing arrived for IdleTimeout. It also pings.
-func (s *Socket) watchdog(ctx context.Context, conn *websocket.Conn, lastRx *atomic.Int64) {
-	tick := time.NewTicker(500 * time.Millisecond)
+// flight), or no frame of any kind arrived for the idle timeout. It pings every third of that timeout;
+// a missing pong is left to the idle check, so silence has one rule. Only one ping waits for its pong at
+// a time, so a server that sends data but never answers pings doesn't pile up waiting goroutines.
+func (s *Socket) watchdog(ctx context.Context, conn *websocket.Conn) {
+	tick := time.NewTicker(behavior.WatchdogInterval)
 	defer tick.Stop()
 	lastPing := time.Now()
+	var pinging atomic.Bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -687,16 +694,16 @@ func (s *Socket) watchdog(ctx context.Context, conn *websocket.Conn, lastRx *ato
 				s.dropConn(conn, reason)
 				return
 			}
-			if now.Sub(time.Unix(0, lastRx.Load())) > IdleTimeout {
-				s.dropConn(conn, fmt.Sprintf("no frames for %s", IdleTimeout))
+			if now.Sub(time.Unix(0, s.lastRx.Load())) > s.idleTimeout {
+				s.dropConn(conn, fmt.Sprintf("no frames for %s", s.idleTimeout))
 				return
 			}
-			if now.Sub(lastPing) > Heartbeat {
+			if now.Sub(lastPing) >= s.idleTimeout/3 && pinging.CompareAndSwap(false, true) {
 				lastPing = now
 				go func() {
-					pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-					defer cancel()
-					if err := conn.Ping(pctx); err != nil && ctx.Err() == nil {
+					defer pinging.Store(false)
+					// Ping waits for its pong until the connection ends; only a failed write drops it.
+					if err := conn.Ping(ctx); err != nil && ctx.Err() == nil {
 						s.dropConn(conn, "ping failed: "+err.Error())
 					}
 				}()

@@ -40,7 +40,10 @@ type fakeGateway struct {
 
 	mu         sync.Mutex
 	conn       *websocket.Conn
-	received   []map[string]any // every client WS frame
+	silent     map[*websocket.Conn]bool // connections that send nothing, not even pongs
+	noPongs    bool                     // answer no pings, but keep sending frames
+	lostPings  int                      // pings received while noPongs is set
+	received   []map[string]any         // every client WS frame
 	handshakes []http.Header
 	restCalls  []string // paths, in order (a lite path as its full path)
 	wirePaths  []string // paths as called
@@ -54,14 +57,24 @@ type fakeGateway struct {
 	ackLatest         uint64 // when set, the next subscribe ack uses it as latest_sequence_number
 	rejectHandshake   int
 	firstCookieMaxAge int // seconds, for the first login's cookie; later ones (and the default) get 3600
+	failLogin         int // when set, that login (1 is the first) answers 500
 	rest              func(path string, body []byte) (int, string)
 	rpc               func(method string, params json.RawMessage) (any, wsAction)
 }
 
-func newFakeGateway(t *testing.T) *fakeGateway { return newFakeGatewayFor(t, testEncoding()) }
+// encodings are the wire encodings every fake gateway test runs in. Lite is what users get by default, full is
+// the fallback, so a test that passed in one alone would leave the other unchecked.
+var encodings = []Encoding{EncodingFull, EncodingLite}
 
-// newFakeGatewayFor serves a client in enc; testClient configures the client to match.
-func newFakeGatewayFor(t *testing.T, enc Encoding) *fakeGateway {
+// eachEncoding runs test once per encoding, as a subtest named after it.
+func eachEncoding(t *testing.T, test func(t *testing.T, enc Encoding)) {
+	for _, enc := range encodings {
+		t.Run(enc.String(), func(t *testing.T) { test(t, enc) })
+	}
+}
+
+// newFakeGateway serves a client in enc; testClient configures the client to match.
+func newFakeGateway(t *testing.T, enc Encoding) *fakeGateway {
 	g := &fakeGateway{t: t, last: map[string]uint64{}}
 	if enc == EncodingLite {
 		g.lite = mustLiteSchema(t)
@@ -72,7 +85,7 @@ func newFakeGatewayFor(t *testing.T, enc Encoding) *fakeGateway {
 }
 
 // newReachabilityServer answers complete wire models to REST calls (used by the generated api_gen_test.go).
-func newReachabilityServer(t *testing.T, enc Encoding) *fakeGateway { return newFakeGatewayFor(t, enc) }
+func newReachabilityServer(t *testing.T, enc Encoding) *fakeGateway { return newFakeGateway(t, enc) }
 
 // encoding is the encoding this gateway serves; clients talking to it must use the same one.
 func (g *fakeGateway) encoding() Encoding {
@@ -125,7 +138,13 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		g.restCalls = append(g.restCalls, r.URL.Path)
 		g.wirePaths = append(g.wirePaths, r.URL.Path)
+		fail := n == g.failLogin
 		g.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"code":1002,"message":"internal","status":500}`)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{Name: CookieName, Value: fmt.Sprintf("sess-%d", n), MaxAge: maxAge,
 			Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		w.Header().Set(AccountHeader, "acct-1")
@@ -183,7 +202,10 @@ func (g *fakeGateway) serveWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no", reject)
 		return
 	}
-	c, err := websocket.Accept(w, r, nil)
+	var c *websocket.Conn
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OnPingReceived: func(context.Context, []byte) bool { return !g.isSilent(c) && !g.dropPing() },
+	})
 	if err != nil {
 		return
 	}
@@ -202,6 +224,9 @@ func (g *fakeGateway) serveWS(w http.ResponseWriter, r *http.Request) {
 				g.t.Errorf("fake gateway: lite frame %s: %v", data, ferr)
 			}
 			data = full
+		}
+		if g.isSilent(c) {
+			continue
 		}
 		var m map[string]any
 		_ = json.Unmarshal(data, &m)
@@ -272,8 +297,39 @@ func frame(stream, sel string, seq, prev uint64) map[string]any {
 		"prev_sequence_number": strconv.FormatUint(prev, 10), "feed": feedFixture(stream)}
 }
 
+// silence keeps the current connection open but sends nothing more on it: no frames, replies or pongs.
+func (g *fakeGateway) silence() {
+	g.streamMu.Lock()
+	defer g.streamMu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.silent == nil {
+		g.silent = map[*websocket.Conn]bool{}
+	}
+	g.silent[g.conn] = true
+}
+
+// dropPing reports whether to leave a ping unanswered (noPongs), counting the ones it leaves.
+func (g *fakeGateway) dropPing() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.noPongs {
+		g.lostPings++
+	}
+	return g.noPongs
+}
+
+func (g *fakeGateway) isSilent(c *websocket.Conn) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.silent[c]
+}
+
 // send writes a stream frame.
 func (g *fakeGateway) send(ctx context.Context, c *websocket.Conn, v any) {
+	if g.isSilent(c) {
+		return
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		g.t.Errorf("fake gateway: encoding frame: %v", err)

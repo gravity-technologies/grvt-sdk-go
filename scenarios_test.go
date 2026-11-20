@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"reflect"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,17 +48,23 @@ type runtimeScenario struct {
 		Seconds                 float64 `json:"seconds"`
 		WSRequestTimeoutMS      int     `json:"ws_request_timeout_ms"`
 		ResyncTimeoutMS         int     `json:"resync_timeout_ms"`
+		IdleTimeoutMS           int     `json:"idle_timeout_ms"`
 		Instruments             []string
 		QueueSize               int `json:"queue_size"`
 		CookieMaxAgeS           int `json:"cookie_max_age_s"`
 		Take                    int
 		Gap                     scenarioGap
+		Bulk                    bool
+		APIKey                  *bool `json:"api_key"`
+		OffTick                 bool  `json:"off_tick"`
 	}
 	Replies []scenarioReply
 	Steps   []struct {
 		Push             []uint64
 		Feed             *struct{ Value json.RawMessage }
 		Drop             bool
+		Silence          bool
+		SleepMS          int    `json:"sleep_ms"`
 		IgnoreSubscribes int    `json:"ignore_subscribes"`
 		AckLatest        uint64 `json:"ack_latest"`
 		WaitAcks         int    `json:"wait_acks"`
@@ -67,10 +72,15 @@ type runtimeScenario struct {
 		WaitDropped      uint64 `json:"wait_dropped"`
 	}
 	Expect struct {
-		Outcome, RPC      string
-		Code              int
-		Status            json.RawMessage // absent: not checked; null: no HTTP status (WebSocket)
-		Retryable, Sent   *bool
+		Outcome, RPC    string
+		Code            int
+		Status          json.RawMessage // absent: not checked; null: no HTTP status (WebSocket)
+		Retryable, Sent *bool
+		Events          []struct {
+			Kind    EventKind
+			RPC     string
+			Attempt int
+		}
 		Attempts, Retries *int
 		ClientOrderIDs    []string `json:"client_order_ids"`
 		SentClientOrderID string   `json:"sent_client_order_id"`
@@ -97,62 +107,10 @@ type runtimeScenario struct {
 	Skip map[string]string
 }
 
-var behaviorRef = regexp.MustCompile(`^\$([a-z_]+)(?:\.(\d+))?(?:\*(\d+))?([+-]\d+)?$`)
-
-// resolveBehavior replaces every "$key", "$key.index", "$key*n" and "$key+n" string with the value from
-// behavior.json.
-func resolveBehavior(t *testing.T, v any, behavior map[string]struct{ Value any }) any {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, e := range x {
-			x[k] = resolveBehavior(t, e, behavior)
-		}
-	case []any:
-		for i, e := range x {
-			x[i] = resolveBehavior(t, e, behavior)
-		}
-	case string:
-		m := behaviorRef.FindStringSubmatch(x)
-		if m == nil {
-			return x
-		}
-		entry, ok := behavior[m[1]]
-		if !ok {
-			t.Fatalf("unknown behavior key %q", m[1])
-		}
-		value := entry.Value
-		if m[2] != "" {
-			i, _ := strconv.Atoi(m[2])
-			value = value.([]any)[i]
-		}
-		if m[3] != "" {
-			n, _ := strconv.Atoi(m[3])
-			value = value.(float64) * float64(n)
-		}
-		if m[4] != "" {
-			n, _ := strconv.Atoi(m[4])
-			value = value.(float64) + float64(n)
-		}
-		return value
-	}
-	return v
-}
-
-// loadRuntimeScenarios reads the scenarios; go test ./sdk/generator/... checks them against
-// runtime.schema.json.
+// loadRuntimeScenarios reads runtime.json with its behavior.json references already replaced by their values;
+// go test ./sdk/generator/... writes that copy and checks the scenarios against runtime.schema.json.
 func loadRuntimeScenarios(t *testing.T) []runtimeScenario {
-	var behavior map[string]struct{ Value any }
-	var raw any
-	for path, dst := range map[string]any{"contract/behavior.json": &behavior, "scenarios/runtime.json": &raw} {
-		data, err := ReadShared(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = json.Unmarshal(data, dst); err != nil {
-			t.Fatal(err)
-		}
-	}
-	data, err := json.Marshal(resolveBehavior(t, raw, behavior))
+	data, err := ReadShared("scenarios/runtime.resolved.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,10 +190,14 @@ func TestSharedRuntimeScenarios(t *testing.T) {
 }
 
 func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
-	g := newFakeGatewayFor(t, enc)
+	g := newFakeGateway(t, enc)
 	script := &scenarioScript{replies: sc.Replies}
 	path := map[string]string{"read": RPCTickerTicker.Path, "write": RPCOrderCreateOrder.Path,
 		"countdown": RPCOrderCancelOnDisconnect.Path}[sc.Call.Kind]
+	method := "v1/create_order"
+	if sc.Call.Bulk {
+		path, method = RPCOrderBulkOrders.Path, "v2/bulk_orders"
+	}
 	ws := sc.Call.Transport == "ws"
 	g.rest = func(p string, _ []byte) (int, string) {
 		if p != path || ws {
@@ -267,7 +229,9 @@ func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 	c, ev := testClient(t, g, func(c *Config) {
 		target := "http://" + scenarioHost + ":" + g.srv.URL[strings.LastIndex(g.srv.URL, ":")+1:]
 		c.Env.MarketDataURL, c.Env.TradingURL = target, target
-		c.APIKey = "key"
+		if sc.Call.APIKey == nil {
+			c.APIKey = "key"
+		}
 		c.Signer = signer
 		c.HTTPClient = &http.Client{Transport: scenarioTransport(g, script)}
 		if ws {
@@ -277,7 +241,8 @@ func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 			c.WSRequestTimeout = time.Duration(sc.Call.WSRequestTimeoutMS) * time.Millisecond
 		}
 	})
-	c.Runtime().Metadata().PutInstrument("BTC_USDT_Perp", InstrumentMeta{InstrumentHash: "0x030501", BaseDecimals: 9})
+	c.Runtime().Metadata().PutInstrument("BTC_USDT_Perp", InstrumentMeta{InstrumentHash: "0x030501", BaseDecimals: 9,
+		Limits: map[string]string{"tick_size": "0.1", "min_size": "0.001", "min_notional": "100"}})
 
 	ctx := context.Background()
 	switch sc.Call.Kind {
@@ -294,14 +259,22 @@ func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 			}
 			req.Order.Metadata = &models.OrderMetadataInput{ClientOrderID: Ptr(id)}
 		}
-		_, err = c.CreateOrder(ctx, req)
+		if sc.Call.OffTick {
+			req.Order.Legs[0].LimitPrice = Ptr(models.MustParseDecimal("65000.15"))
+		}
+		if sc.Call.Bulk {
+			orders := []models.OrderInput{oneLegOrder().Order, oneLegOrder().Order}
+			_, err = c.BulkOrders(ctx, &models.ApiBulkOrdersRequestInput{SubAccountID: 123, Orders: orders})
+		} else {
+			_, err = c.CreateOrder(ctx, req)
+		}
 	}
 
 	want := sc.Expect
 	checkScenarioError(t, err, sc)
 	_, attempts := script.last()
 	if ws {
-		attempts = g.calls("v1/create_order")
+		attempts = g.calls(method)
 	}
 	if want.Attempts != nil && attempts != *want.Attempts {
 		t.Errorf("%d attempts, want %d", attempts, *want.Attempts)
@@ -309,19 +282,35 @@ func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 	if n := len(ev.of(EventRetry)); want.Retries != nil && n != *want.Retries {
 		t.Errorf("%d retry events, want %d", n, *want.Retries)
 	}
-	if want.SentClientOrderID != "" || want.Outcome == "order_state_unknown" {
-		// The order the gateway got: the WS frame's params, or the last REST body (login has none).
-		var sent struct {
-			Order struct {
-				Metadata struct {
-					ClientOrderID string `json:"client_order_id"`
-				}
+	if want.Events != nil {
+		ev.mu.Lock()
+		got := slices.Clone(ev.list) // frames are not recorded
+		ev.mu.Unlock()
+		if len(got) != len(want.Events) {
+			t.Errorf("events %+v, want %+v", got, want.Events)
+		}
+		for i := range min(len(got), len(want.Events)) {
+			w, e := want.Events[i], got[i]
+			if e.Kind != w.Kind || (w.RPC != "" && e.RPC != w.RPC) || (w.Attempt != 0 && e.Attempt != w.Attempt) {
+				t.Errorf("event %d is %+v, want %+v", i, e, w)
 			}
+		}
+	}
+	if want.SentClientOrderID != "" || want.Outcome == "order_state_unknown" {
+		// The orders the gateway got: the WS frame's params, or the last REST body (login has none).
+		type order struct {
+			Metadata struct {
+				ClientOrderID string `json:"client_order_id"`
+			}
+		}
+		var sent struct {
+			Order  *order
+			Orders []order
 		}
 		var body []byte
 		var merr error
 		if ws {
-			body, merr = json.Marshal(g.frames("v1/create_order")[0]["params"])
+			body, merr = json.Marshal(g.frames(method)[0]["params"])
 		} else {
 			g.mu.Lock()
 			body = g.restBodies[len(g.restBodies)-1]
@@ -333,18 +322,32 @@ func runCallScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 		if uerr := json.Unmarshal(body, &sent); uerr != nil {
 			t.Fatal(uerr)
 		}
-		id := sent.Order.Metadata.ClientOrderID
+		if sent.Order != nil {
+			sent.Orders = append(sent.Orders, *sent.Order)
+		}
+		ids := []string{}
+		for _, o := range sent.Orders {
+			ids = append(ids, o.Metadata.ClientOrderID)
+		}
 		var unknown *OrderStateUnknownError
-		if errors.As(err, &unknown) && (len(unknown.ClientOrderIDs) != 1 || strconv.FormatUint(unknown.ClientOrderIDs[0], 10) != id) {
-			t.Errorf("order state unknown reports client order ids %v, want the sent %s", unknown.ClientOrderIDs, id)
+		if errors.As(err, &unknown) {
+			got := []string{}
+			for _, id := range unknown.ClientOrderIDs {
+				got = append(got, strconv.FormatUint(id, 10))
+			}
+			if !slices.Equal(got, ids) {
+				t.Errorf("order state unknown reports client order ids %v, want the sent %v", got, ids)
+			}
 		}
 		if want.SentClientOrderID == "" {
 			return
 		}
-		if n, perr := strconv.ParseUint(id, 10, 64); want.SentClientOrderID == "generated" && (perr != nil || n < 1<<63) {
-			t.Errorf("generated client order id %q is outside [2^63, 2^64)", id)
-		} else if want.SentClientOrderID != "generated" && id != want.SentClientOrderID {
-			t.Errorf("sent client order id %q, want %q", id, want.SentClientOrderID)
+		for _, id := range ids {
+			if n, perr := strconv.ParseUint(id, 10, 64); want.SentClientOrderID == "generated" && (perr != nil || n < 1<<63) {
+				t.Errorf("generated client order id %q is outside [2^63, 2^64)", id)
+			} else if want.SentClientOrderID != "generated" && id != want.SentClientOrderID {
+				t.Errorf("sent client order id %q, want %q", id, want.SentClientOrderID)
+			}
 		}
 	}
 }
@@ -358,6 +361,7 @@ func checkScenarioError(t *testing.T, err error, sc runtimeScenario) {
 	var api *APIError
 	var transport *TransportError
 	var config *ConfigError
+	var bounds *OrderOutOfBoundsError
 	got, status := "ok", 0
 	switch {
 	case err == nil:
@@ -371,8 +375,12 @@ func checkScenarioError(t *testing.T, err error, sc runtimeScenario) {
 		got, status = "api_error", api.Status
 	case errors.As(err, &transport):
 		got = "transport_error"
+	case errors.As(err, &bounds):
+		got = "order_out_of_bounds"
+	case errors.As(err, &config) && want.Outcome == "config_error":
+		got = "config_error" // a missing API key; Go has no other kind for it
 	case errors.As(err, &config):
-		got = "validation_error"
+		got = "validation_error" // the countdown's bounds
 	default:
 		got = fmt.Sprintf("unexpected %T", err)
 	}
@@ -478,12 +486,15 @@ func subscribeScenario(t *testing.T, c *Client, stream, instrument string) (scen
 }
 
 func runStreamScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
-	g := newFakeGatewayFor(t, enc)
+	g := newFakeGateway(t, enc)
 	g.firstCookieMaxAge = sc.Call.CookieMaxAgeS
 	c, ev := testClient(t, g, func(c *Config) {
 		c.APIKey = "key"
 		if sc.Call.ResyncTimeoutMS != 0 {
 			c.ResyncTimeout = time.Duration(sc.Call.ResyncTimeoutMS) * time.Millisecond
+		}
+		if sc.Call.IdleTimeoutMS != 0 {
+			c.IdleTimeout = time.Duration(sc.Call.IdleTimeoutMS) * time.Millisecond
 		}
 		if sc.Call.QueueSize != 0 {
 			c.QueueSize = sc.Call.QueueSize
@@ -507,6 +518,10 @@ func runStreamScenario(t *testing.T, sc runtimeScenario, enc Encoding) {
 			g.push(sc.Call.Stream, selectors[0], step.Push[0], step.Push[1])
 		case step.Drop:
 			g.dropConn()
+		case step.Silence:
+			g.silence()
+		case step.SleepMS != 0:
+			time.Sleep(time.Duration(step.SleepMS) * time.Millisecond)
 		case step.IgnoreSubscribes != 0:
 			g.mu.Lock()
 			g.ignoreSubscribes = step.IgnoreSubscribes

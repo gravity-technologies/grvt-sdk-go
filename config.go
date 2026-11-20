@@ -73,7 +73,9 @@ type Config struct {
 	// transport, a write with no trustworthy reply is conservatively uncertain.
 	HTTPClient *http.Client
 
-	// BeforeSend runs for every RPC before signing (REST or WS). It may change call.Params in place.
+	// BeforeSend runs for every RPC before signing (REST or WS). It may change call.Params in place,
+	// but must not add, remove or reorder orders, or change their client order IDs (prices, sizes and other fields may change): that is a ConfigError and nothing
+	// is sent, since the IDs are how an unknown outcome is looked up.
 	BeforeSend func(call *OutgoingCall)
 	// OnEvent gets connection, stream and retry events. It runs on the socket's read goroutine and
 	// must not block.
@@ -88,7 +90,10 @@ type Config struct {
 	// ResyncTimeout bounds the wait for a fresh snapshot after a gap re-subscribe; past it the socket
 	// reconnects (default 5s).
 	ResyncTimeout time.Duration
-	// QueueSize bounds each subscription's queue (default 4096).
+	// IdleTimeout: a WebSocket connection with no frame at all, not even a ping or pong, for this long
+	// is dropped and reconnected (default 30s). The client pings every third of it.
+	IdleTimeout time.Duration
+	// QueueSize bounds each subscription's queue (default 4096; at least 1).
 	QueueSize int
 	// Logger receives debug logs (redacted). Default: GRVT_LOG=debug logs to stderr, otherwise nothing.
 	Logger *slog.Logger

@@ -3,7 +3,7 @@
 The Go SDK for the Grvt exchange: REST calls, WebSocket streams, order entry, EIP-712 signing and login in one
 module.
 
-> **Preview:** 0.x releases can change the API. Pin an exact version.
+> **Preview.** Any 0.x release can change the API. Pin an exact version.
 
 ## Install
 
@@ -92,7 +92,7 @@ runnable program that places, watches and cancels one testnet order, see the
 ## Go notes
 
 - One `*grvt.Client` is safe for concurrent use. Share it across goroutines; calls that need a login share one.
-- Every call takes a `context.Context`, bounded by `Config.CallTimeout` (30 s). Cancelling a write after it may
+- Every call takes a `context.Context`, bounded by `Config.CallTimeout`. Cancelling a write after it may
   have left returns `*grvt.OrderStateUnknownError`; it never closes the shared WebSocket.
 - `Client.Close()` ends every subscription and fails WebSocket calls still waiting for a reply (writes with
   `*grvt.OrderStateUnknownError`). Later calls return `grvt.ErrClosed`. An HTTP call already running is
@@ -105,11 +105,7 @@ runnable program that places, watches and cancels one testnet order, see the
 
 ## Known limitations
 
-- Private streams can't resume from a sequence number. Backfill missed events over REST.
-- Wallet login isn't supported. The client logs in with an API key only.
-- The WebSocket frame-size check is off for the named environments. When you set
-  `Environment.WSMaxFrameBytes`, an oversized frame fails with `*grvt.FrameTooLargeError`; it is not rerouted
-  over HTTP.
+See [Not supported yet](https://developers.grvt.io/sdks/go#not-supported-yet) on the Go SDK page.
 
 ## Contributing
 

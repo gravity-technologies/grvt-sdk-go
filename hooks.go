@@ -19,7 +19,8 @@ type OutgoingCall struct {
 	// RPC is the method, e.g. "v1/create_order".
 	RPC string
 	// Params is the request: a pointer to the generated request model (e.g.
-	// *models.ApiCreateOrderRequest). Change it in place. For signed calls it is a copy of the
+	// *models.ApiCreateOrderRequest). Change it in place, but don't add, remove or reorder orders or change their
+	// client order IDs (see Config.BeforeSend). For signed calls it is a copy of the
 	// caller's request.
 	Params    any
 	Transport Via

@@ -76,6 +76,7 @@
   "scenarios/orderbook.json",
   "scenarios/orderbook.schema.json",
   "scenarios/runtime.json",
+  "scenarios/runtime.resolved.json",
   "scenarios/runtime.schema.json",
   "scenarios/signing.json",
   "scenarios_test.go",

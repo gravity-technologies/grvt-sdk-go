@@ -54,7 +54,6 @@ examples/quickstart     runnable example
 go test ./...                                              # everything, offline
 go test -race ./...
 GRVT_SMOKE=1 go test -run TestSmokeTestnet -v .            # read-only, unauthenticated testnet check (full and lite)
-GRVT_TEST_ENCODING=lite go test .                          # every fake-gateway test with a lite client
 go test -run '^$' -bench 'Decode|Route|Sign|Encode|Lite' -benchmem .   # hot paths, full vs lite
 ```
 
@@ -88,5 +87,5 @@ Versions are pinned in `go.mod`.
 - **Frame-size check.** `Environment.WSMaxFrameBytes` is 0 for the named environments because the deployed
   limit is not published. Falling back to REST for an oversized frame is a TODO: the runtime can't yet tell
   which RPCs are safe to reroute.
-- **Private-stream resume** waits on server support. Until then, callers backfill over REST.
+- **What users can't do yet** (private-stream resume, wallet login) is listed in [Not supported yet](https://developers.grvt.io/sdks/go#not-supported-yet); keep it there.
 - **Client order IDs** use the wall clock, not `Config.Clock`.

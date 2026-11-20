@@ -5,7 +5,7 @@ through the names on this page. If the generator needs something not listed here
 runtime and to this page; never reach into unexported fields. (Generated root files share package
 `grvt` with the runtime, so the compiler does not enforce this; the rule does.)
 
-The generator is `sdk/generator/golang` (`go run ./sdk/generator go`, or `make sdk-gen` for everything). Its
+The generator is `sdk/generator/golang` (`make sdk-gen-go`, or `make sdk-gen-code` for every SDK and the docs). Its
 output (not committed) is the reference for everything below. Naming and write rules shared with the other
 generators live in `sdk/generator/naming`.
 
@@ -98,10 +98,12 @@ after which the runtime drops the request's `legs[].instrument` from the metadat
 `info.Missing` (a `*ConfigError`) -> copy the request (JSON round trip) when it is signed or gets a
 client order id -> `info.ClientOrderID` (or `info.ClientOrderIDs`, one per order) -> `BeforeSend` hook (only if set) -> `sign` -> encode ->
 `ensureSession` if `spec.Auth` -> REST or WS -> decode `Resp`. For REST the whole body is the
-response; over WS the JSON-RPC `result` is the same struct.
+response; over WS the JSON-RPC `result` is the same struct. An unknown outcome reports the client order ids
+filled before the hook. `BeforeSend` may change the request but must not add, remove or reorder orders, or change their client order IDs (prices, sizes and other fields may change): if
+it does, the call returns a `*ConfigError` and sends nothing.
 
 With `EncodingLite`, a call with a `LitePath` renames the encoded body with `wirejson.ToLite[Req]` after
-everything above (client order ids and metadata refresh read the full body), posts to `LitePath`, and
+everything above (metadata refresh reads the full body), posts to `LitePath`, and
 decodes the reply with `wirejson.UnmarshalLite`. The HTTP error body is `transport.lite.http_error_body`
 (`c`, `m`, `s`). Over WS the socket dials `Environment.*WSLite` when set, else the full URL with `/ws/full` swapped for
 `/ws/lite` (a URL without that ending is a `*ConfigError` at `New`), and uses the lite envelope (generated
@@ -234,7 +236,7 @@ func (c *Client) Close() error
 
 An RPC or stream whose Go name is `Runtime` or `Close` fails generation. `Config` fields: `Env`, `APIKey`, `Signer`,
 `OrderTransport`, `Encoding`, `CheckOrders`, `Clock`, `Nonces`, `ClientOrderIDs`, `HTTPClient`, `BeforeSend`, `OnEvent`,
-`CallTimeout`, `HTTPAttemptTimeout`, `WSRequestTimeout`, `ResyncTimeout`, `QueueSize`, `Logger`.
+`CallTimeout`, `HTTPAttemptTimeout`, `WSRequestTimeout`, `ResyncTimeout`, `IdleTimeout`, `QueueSize`, `Logger`.
 
 ## 7. Generated test
 
@@ -253,7 +255,7 @@ including login, and `WSRequestTimeout` caps a reply or subscribe. Defaults come
 `internal/behavior` (built from `contract/behavior.json`); zero config values select them, and negative values are invalid.
 
 Cancellation before dispatch sends no write. Cancellation after a write may have
-left the process returns `OrderStateUnknownError` with the final submitted order
+left the process returns `OrderStateUnknownError` with the client order
 IDs and the original cause (`errors.Is` still finds context cancellation).
 Metadata and login loads belong to the client: cancelling one waiter does not
 cancel another caller's load. Closing the client cancels these shared loads.
@@ -274,7 +276,5 @@ A started frame uses the runtime context to avoid closing a connection shared by
 
 ## HTTP redirects and retries
 
-The SDK does not follow HTTP redirects for API requests.
-A redirect on a write returns an uncertain outcome instead of sending the signed request to another endpoint.
-The default transports also avoid retries after an uncertain write failure.
-Custom HTTP transports must preserve these rules.
+The SDK never follows a redirect or retries a write, and a custom HTTP transport must not either: the rule and
+why are in [What the SDK retries](https://developers.grvt.io/guides/errors-and-retries#what-the-sdk-retries).

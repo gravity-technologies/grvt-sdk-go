@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -18,8 +17,7 @@ import (
 // The fake gateway's lite mode, written from contract.json alone (not from the SDK's generated codecs):
 // it renames what the client sends from lite to full, failing the test on any key that is not a lite
 // name of its type (a missed rename would be silently ignored by a real lite gateway), and renames
-// what it answers from full to lite. Every fake gateway test runs in lite with GRVT_TEST_ENCODING=lite;
-// the shared runtime scenarios and the RPC reachability test run in both encodings always.
+// what it answers from full to lite. Every fake gateway test runs in both encodings (eachEncoding).
 
 type liteField struct {
 	Name, Lite, Type, Kind string
@@ -265,16 +263,6 @@ func (s *liteSchema) httpErrorToLite(body string) string {
 	return string(b)
 }
 
-// testEncoding is the encoding fake gateway tests use by default (GRVT_TEST_ENCODING=lite for lite).
-func testEncoding() Encoding {
-	if os.Getenv("GRVT_TEST_ENCODING") == "lite" {
-		return EncodingLite
-	}
-	return EncodingFull
-}
-
-var encodings = []Encoding{EncodingFull, EncodingLite}
-
 // -- tests ---------------------------------------------------------------------------------------
 
 func TestLiteConfig(t *testing.T) {
@@ -317,7 +305,7 @@ func TestLiteRESTAndWSMatchFull(t *testing.T) {
 		order      *models.ApiCreateOrderResponse
 	}
 	run := func(t *testing.T, enc Encoding) result {
-		g := newFakeGatewayFor(t, enc)
+		g := newFakeGateway(t, enc)
 		inst := wireFixture("InstrumentDisplay", map[string]any{"instrument": "BTC_USDT_Perp", "instrument_hash": "0x030501", "base_decimals": 9,
 			"quote_decimals": 6, "tick_size": "0.1", "min_size": "0.01", "min_notional": "0", "status": "ACTIVE"})
 		g.rest = func(path string, _ []byte) (int, string) {
@@ -388,7 +376,7 @@ func TestLiteRESTAndWSMatchFull(t *testing.T) {
 func TestLiteErrors(t *testing.T) {
 	for _, enc := range encodings {
 		t.Run(enc.String(), func(t *testing.T) {
-			g := newFakeGatewayFor(t, enc)
+			g := newFakeGateway(t, enc)
 			g.rest = func(string, []byte) (int, string) {
 				return 400, `{"code":1003,"message":"bad","status":400}`
 			}
