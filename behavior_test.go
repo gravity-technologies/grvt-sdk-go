@@ -54,6 +54,25 @@ func TestSharedClientDefaults(t *testing.T) {
 	}
 }
 
+func TestClientsShareDefaultOrderIDs(t *testing.T) {
+	provider := func(ids ClientOrderIDProvider) ClientOrderIDProvider {
+		t.Helper()
+		c, err := New(Config{Env: Testnet(), ClientOrderIDs: ids})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c.Runtime().clientOrderIDs
+	}
+	if provider(nil) != provider(nil) {
+		t.Fatal("default clients have separate order ID providers")
+	}
+	custom := &TimeCounterClientOrderID{}
+	if provider(custom) != custom {
+		t.Fatal("client ignored its order ID provider")
+	}
+}
+
 func TestSharedClientOrderIDLayout(t *testing.T) {
 	var ids TimeCounterClientOrderID
 	before := uint64(time.Now().Unix())

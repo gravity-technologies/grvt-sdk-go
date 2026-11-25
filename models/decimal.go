@@ -30,7 +30,10 @@ func (d Decimal) Rat() *big.Rat {
 	return value
 }
 
-func (d Decimal) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+func (d Decimal) MarshalJSON() ([]byte, error) {
+	// Decimal text contains only digits, '-' and '.', so JSON needs no escaping.
+	return []byte(`"` + d.String() + `"`), nil
+}
 
 func (d *Decimal) UnmarshalJSON(data []byte) error {
 	var text string

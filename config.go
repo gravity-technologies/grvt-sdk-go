@@ -46,7 +46,7 @@ func (e Encoding) String() string {
 type Config struct {
 	// SubAccountID fills omitted request and stream account IDs. Zero means unset.
 	SubAccountID uint64
-	// Env is where to connect: Testnet(), Prod() or your own Environment.
+	// Env is where to connect: Testnet(), Production() or your own Environment.
 	Env Environment
 	// APIKey logs in on the first authenticated call (gravity cookie + X-Grvt-Account-Id).
 	APIKey string

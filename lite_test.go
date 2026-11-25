@@ -266,7 +266,7 @@ func (s *liteSchema) httpErrorToLite(body string) string {
 // -- tests ---------------------------------------------------------------------------------------
 
 func TestLiteConfig(t *testing.T) {
-	for _, env := range []Environment{Testnet(), Prod()} {
+	for _, env := range []Environment{Testnet(), Production()} {
 		if !strings.HasSuffix(env.MarketDataWSLite, "/ws/lite") || !strings.HasSuffix(env.TradingWSLite, "/ws/lite") {
 			t.Errorf("%s: lite WebSocket URLs %q %q", env.Name, env.MarketDataWSLite, env.TradingWSLite)
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gravity-technologies/grvt-sdk-go/models"
@@ -95,6 +96,31 @@ func TestSharedOrderBookScenarios(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOrderBookRejectsUnrepresentableLevels(t *testing.T) {
+	one := models.MustParseDecimal("1")
+	tiny := models.MustParseDecimal("0." + strings.Repeat("0", 1_000_000) + "1")
+	for _, level := range []models.OrderbookLevel{
+		{Size: tiny}, {Price: one, Size: tiny}, {Price: tiny, Size: one},
+	} {
+		book, _ := NewOrderBook("X", BookDelta)
+		frame := models.WSOrderbookLevelsFeedDataV1{Feed: models.OrderbookLevels{
+			Instrument: "X", Bids: []models.OrderbookLevel{{Price: one, Size: one}},
+		}}
+		if err := book.Apply(frame); err != nil {
+			t.Fatal(err)
+		}
+		frame.SequenceNumber = 1
+		frame.Feed.Asks = []models.OrderbookLevel{level}
+		var failure *BookError
+		if err := book.Apply(frame); !errors.As(err, &failure) || failure.Reason != "invalid_level" {
+			t.Fatalf("want invalid_level, got %v", err)
+		}
+		if _, err := book.Snapshot(); err == nil {
+			t.Fatal("invalid book still readable")
+		}
 	}
 }
 

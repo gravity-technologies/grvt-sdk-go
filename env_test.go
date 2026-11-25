@@ -47,13 +47,15 @@ func TestCustomEnvironment(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"testnet", "prod"} {
+	for _, name := range []string{"testnet", "production"} {
 		if _, err := EnvironmentNamed(name); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if _, err := EnvironmentNamed("staging"); err == nil {
-		t.Error("only testnet and prod are named environments")
+	for _, name := range []string{"staging", "prod"} {
+		if _, err := EnvironmentNamed(name); err == nil {
+			t.Errorf("unexpected named environment %q", name)
+		}
 	}
 }
 

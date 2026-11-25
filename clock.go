@@ -67,9 +67,10 @@ func (RandomNonce) NextNonce() uint32 {
 	return binary.LittleEndian.Uint32(b[:])
 }
 
-// TimeCounterClientOrderID gives 1<<63 | seconds<<31 | counter: unique per process, sortable, and in the
-// API client range [2^63, 2^64). The counter starts at a random 31-bit value, so separate processes rarely
-// collide.
+var defaultClientOrderIDs TimeCounterClientOrderID
+
+// TimeCounterClientOrderID generates IDs from the Unix second and a randomly seeded 31-bit counter.
+// By default, all clients in the process share one instance.
 type TimeCounterClientOrderID struct {
 	once    sync.Once
 	counter atomic.Uint32

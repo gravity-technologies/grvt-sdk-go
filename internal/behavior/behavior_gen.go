@@ -84,8 +84,8 @@ const ClientOrderIDSecondsBits = 32
 // ClientOrderIDSecondsMask: (1 << CLIENT_ORDER_ID_SECONDS_BITS) - 1.
 const ClientOrderIDSecondsMask = 0xFFFFFFFF
 
-// ClientOrderIDCounterBits: Width of the per-process counter in the low bits of a generated
-// client order ID.
+// ClientOrderIDCounterBits: Width of the counter shared by default clients of the same loaded
+// SDK, in the low bits of a generated client order ID.
 const ClientOrderIDCounterBits = 31
 
 // ClientOrderIDCounterMask: (1 << CLIENT_ORDER_ID_COUNTER_BITS) - 1.

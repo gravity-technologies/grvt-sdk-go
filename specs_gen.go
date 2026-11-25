@@ -3,9 +3,40 @@
 
 package grvt
 
+import "fmt"
+
 // ContractVersion is the contract version this code was generated from. The module's own version is its
 // independent git tag (vX.Y.Z) in github.com/gravity-technologies/grvt-sdk-go.
 const ContractVersion = "0.1.0"
+
+var namedEnvironments = map[string]Environment{
+	"testnet": {
+		Name: "testnet", ChainID: 326,
+		MarketDataURL: "https://market-data.testnet.grvt.io", TradingURL: "https://trades.testnet.grvt.io", EdgeURL: "https://edge.testnet.grvt.io",
+		MarketDataWS: "wss://market-data.testnet.grvt.io/ws/full", TradingWS: "wss://trades.testnet.grvt.io/ws/full",
+		MarketDataWSLite: "wss://market-data.testnet.grvt.io/ws/lite", TradingWSLite: "wss://trades.testnet.grvt.io/ws/lite",
+	},
+	"production": {
+		Name: "production", ChainID: 325,
+		MarketDataURL: "https://market-data.grvt.io", TradingURL: "https://trades.grvt.io", EdgeURL: "https://edge.grvt.io",
+		MarketDataWS: "wss://market-data.grvt.io/ws/full", TradingWS: "wss://trades.grvt.io/ws/full",
+		MarketDataWSLite: "wss://market-data.grvt.io/ws/lite", TradingWSLite: "wss://trades.grvt.io/ws/lite",
+	},
+}
+
+// Testnet returns the testnet environment (chain ID 326).
+func Testnet() Environment { return namedEnvironments["testnet"] }
+
+// Production returns the production environment (chain ID 325).
+func Production() Environment { return namedEnvironments["production"] }
+
+// EnvironmentNamed returns the built-in environment with the given name.
+func EnvironmentNamed(name string) (Environment, error) {
+	if env, ok := namedEnvironments[name]; ok {
+		return env, nil
+	}
+	return Environment{}, &ConfigError{Message: fmt.Sprintf("unknown env %q; use \"testnet\", \"production\" or build an Environment", name)}
+}
 
 // Descriptors for every RPC and stream. The runtime reads only these.
 

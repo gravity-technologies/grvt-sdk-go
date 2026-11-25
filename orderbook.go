@@ -111,29 +111,13 @@ func (b *OrderBook) apply(frame models.WSOrderbookLevelsFeedDataV1) error {
 			return b.fail("out_of_order", nil)
 		}
 	}
-	for _, levels := range [][]models.OrderbookLevel{frame.Feed.Bids, frame.Feed.Asks} {
-		for _, level := range levels {
-			if level.Price.Rat().Sign() <= 0 || level.Size.Rat().Sign() < 0 {
-				return b.fail("invalid_level", nil)
-			}
-		}
-	}
 	if snapshot {
 		clear(b.bids)
 		clear(b.asks)
 	}
-	update := func(levels []models.OrderbookLevel, side map[string]models.OrderbookLevel) {
-		for _, level := range levels {
-			key := level.Price.Rat().RatString()
-			if level.Size.Rat().Sign() == 0 {
-				delete(side, key)
-			} else {
-				side[key] = level
-			}
-		}
+	if !applyLevels(b.bids, frame.Feed.Bids) || !applyLevels(b.asks, frame.Feed.Asks) {
+		return b.fail("invalid_level", nil)
 	}
-	update(frame.Feed.Bids, b.bids)
-	update(frame.Feed.Asks, b.asks)
 	b.stream = frame.Stream
 	b.selector = frame.Selector
 	b.sequence = frame.SequenceNumber
@@ -142,6 +126,27 @@ func (b *OrderBook) apply(frame models.WSOrderbookLevelsFeedDataV1) error {
 	b.gap = nil
 	return nil
 }
+
+func applyLevels(side map[string]models.OrderbookLevel, levels []models.OrderbookLevel) bool {
+	for _, level := range levels {
+		price := level.Price.Rat()
+		if price == nil || price.Sign() <= 0 {
+			return false
+		}
+		size := level.Size.Rat()
+		if size == nil || size.Sign() < 0 {
+			return false
+		}
+		key := price.RatString()
+		if size.Sign() == 0 {
+			delete(side, key)
+		} else {
+			side[key] = level
+		}
+	}
+	return true
+}
+
 func (b *OrderBook) Snapshot() (BookSnapshot, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

@@ -66,7 +66,7 @@ func NewRuntime(cfg Config, errors ErrorTable) (*Runtime, error) {
 		return nil, &ConfigError{Message: fmt.Sprintf("QueueSize must be at least %d (zero uses the default)", behavior.QueueSizeMin)}
 	}
 	if cfg.Env == (Environment{}) {
-		return nil, &ConfigError{Message: "Config.Env is required: grvt.Testnet(), grvt.Prod() or your own Environment"}
+		return nil, &ConfigError{Message: "Config.Env is required: grvt.Testnet(), grvt.Production() or your own Environment"}
 	}
 	if err := cfg.Env.Validate(); err != nil {
 		return nil, err
@@ -95,7 +95,7 @@ func NewRuntime(cfg Config, errors ErrorTable) (*Runtime, error) {
 		rt.nonces = RandomNonce{}
 	}
 	if rt.clientOrderIDs == nil {
-		rt.clientOrderIDs = &TimeCounterClientOrderID{}
+		rt.clientOrderIDs = &defaultClientOrderIDs
 	}
 	if rt.http == nil {
 		transport := http.DefaultTransport

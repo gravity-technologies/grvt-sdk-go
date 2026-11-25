@@ -59,7 +59,7 @@ type StreamSpec struct {
 	Conflate bool
 }
 
-// Environment says where the SDK connects and which chain id it signs for. Use Testnet() or Prod(),
+// Environment says where the SDK connects and which chain id it signs for. Use Testnet() or Production(),
 // or build one (a local gateway, a test server).
 type Environment struct {
 	Name string
@@ -79,20 +79,6 @@ type Environment struct {
 	// WSMaxFrameBytes is the largest WS frame the gateway accepts; 0 means do not check. The deployed
 	// value is not published yet, so the named environments leave it 0.
 	WSMaxFrameBytes int
-}
-
-func hosted(name, domain string, chainID uint64) Environment {
-	return Environment{
-		Name:             name,
-		MarketDataURL:    "https://market-data." + domain,
-		TradingURL:       "https://trades." + domain,
-		EdgeURL:          "https://edge." + domain,
-		MarketDataWS:     "wss://market-data." + domain + fullWSPath,
-		TradingWS:        "wss://trades." + domain + fullWSPath,
-		MarketDataWSLite: "wss://market-data." + domain + LiteWSPath,
-		TradingWSLite:    "wss://trades." + domain + LiteWSPath,
-		ChainID:          chainID,
-	}
 }
 
 // Validate reports a missing URL or chain id. Every field of a custom Environment is used as given: nothing
@@ -115,23 +101,6 @@ func (e *Environment) Validate() error {
 			e.Name, strings.Join(missing, ", "))}
 	}
 	return nil
-}
-
-// Testnet is the Grvt testnet (chain id 326).
-func Testnet() Environment { return hosted("testnet", "testnet.grvt.io", 326) }
-
-// Prod is Grvt production (chain id 325).
-func Prod() Environment { return hosted("prod", "grvt.io", 325) }
-
-// EnvironmentNamed returns "testnet" or "prod".
-func EnvironmentNamed(name string) (Environment, error) {
-	switch name {
-	case "testnet":
-		return Testnet(), nil
-	case "prod":
-		return Prod(), nil
-	}
-	return Environment{}, &ConfigError{Message: fmt.Sprintf("unknown env %q; use \"testnet\", \"prod\" or build an Environment", name)}
 }
 
 // fullWSPath is the full WebSocket path that a lite URL is derived from.

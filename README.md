@@ -99,9 +99,8 @@ runnable program that places, watches and cancels one testnet order, see the
   bounded by its own context, not by `Close`.
 - `Config.OnEvent` runs on the socket's read goroutine. Return quickly; a blocked hook stalls every stream on
   that socket.
-- Generated `client_order_id`s are unique within one process only; separate processes rarely collide but
-  can. If several processes trade one sub-account, set your own IDs per order or through
-  `Config.ClientOrderIDs`.
+- Clients in one process share the default order ID counter. If several processes trade one sub-account,
+  assign each process a distinct range using explicit order IDs or `Config.ClientOrderIDs`.
 
 ## Known limitations
 
