@@ -16843,7 +16843,7 @@ type ApiSfpTradingScheduleResponse struct {
 	Commodity *SfpMarketSchedule `json:"commodity,omitempty"`
 	// Legacy: use `schedules` instead. Schedule for the `COMMODITY_CME` asset class
 	CommodityCme *SfpMarketSchedule `json:"commodity_cme,omitempty"`
-	// Trading hours as groups of stable perps sharing them: one per asset class, named after it, then one per instrument schedule, named in cluster config. Each...
+	// Trading hours as groups of stable perps sharing them: one per asset class, named after it, then one per instrument schedule, named in cluster config. A group...
 	Schedules []SfpTradingScheduleGroup `json:"schedules"`
 }
 
@@ -32365,7 +32365,7 @@ func liteFromSfpMarketSchedule(r *wirejson.Reader, out []byte) ([]byte, error) {
 type SfpTradingScheduleGroup struct {
 	// The group name. For stable perps on their asset class hours, the asset class (for example `COMMODITY_CME`)
 	Name string `json:"name"`
-	// The instruments' asset class. Its holiday calendar sets the group's holidays
+	// The instruments' asset class. The group's holidays come from the stable perps' own holiday calendar when one lists them, else from the asset class's default...
 	AssetClass AssetClass `json:"asset_class"`
 	// The stable perps trading these hours, sorted. Each stable perp with a schedule is in exactly one group
 	Instruments []string `json:"instruments"`
